@@ -2,8 +2,12 @@ name: Ingest News to Notion
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '7,37 * * * *'
   workflow_dispatch:
+
+concurrency:
+  group: ingest-news-to-notion
+  cancel-in-progress: true
 
 jobs:
   ingest:
