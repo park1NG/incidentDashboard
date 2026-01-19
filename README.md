@@ -64,6 +64,7 @@ IncidentDashboard는 다음 절차로 동작합니다.
 ```bash
 git clone https://github.com/<YOUR_ID>/incidentdashboard.git
 cd incidentdashboard
+```
 
 ### 2) 가상환경 구성 및 의존성 설치
 
@@ -71,6 +72,7 @@ cd incidentdashboard
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+```
 
 ### 3) 환경변수 설정
 
@@ -79,6 +81,7 @@ pip install -r requirements.txt
 
 ```bash
 touch .env
+```
 
 예시:
 ```env
@@ -89,11 +92,12 @@ NAVER_CLIENT_SECRET=xxxxxxxx
 
 UPDATE_EXISTING=0
 DEBUG_DUMP=0
+```
 
 ### 4) 실행
 ```bash
 python ingest_news_to_notion.py
-
+```
 ---
 
 ## GitHub Actions 자동 실행(30분 주기)
@@ -110,7 +114,7 @@ on:
   schedule:
     - cron: "*/30 * * * *"
   workflow_dispatch:
-
+```
 cron은 UTC 기준으로 동작합니다.
 다만 30분 간격 실행은 지역 시간과 무관하게 동일한 주기로 운영됩니다.
 GitHub Actions 특성상 실제 실행 시각이 몇 분 지연될 수 있으며 이는 정상 동작 범위입니다.
@@ -178,3 +182,4 @@ Notion에서는 운영 목적에 맞는 뷰를 구성하면 활용도가 높아�
 
 UPDATE_EXISTING을 기본값(0)으로 유지하는 이유는 명확합니다.
 주기 실행 시 동일 페이지가 반복 수정되면 변경 이력이 불필요하게 쌓이고, 협업 환경에서 노이즈가 발생하기 때문입니다.
+
