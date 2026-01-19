@@ -15,6 +15,10 @@ IncidentDashboard는 국내외 보안 사고(침해사고, 개인정보 유출, 
 정해진 주기로 기사를 수집하고, 제목·출처·링크·발행일·요약 등 보고서 작성에 필요한 핵심 항목을 표준화된 형태로 Notion DB에 누적 저장합니다.  
 운영자는 Notion의 필터와 정렬을 기반으로 사고 목록을 정리하고, 보고서 초안을 보다 빠르게 작성할 수 있습니다.
 
+
+![Notion Incident DB ????](docs/images/01_notion_list_view.png)
+_Notion DB? ?? ??? ?? ?? ?? ?????._
+
 ---
 
 ## 목적
@@ -38,6 +42,10 @@ IncidentDashboard는 다음 절차로 동작합니다.
 2) 기사 내용을 정제하고 필요한 정보를 추출합니다.  
 3) Notion 데이터베이스에 표준화된 형태로 저장합니다.  
 4) GitHub Actions가 위 과정을 일정 주기로 자동 실행합니다.
+
+![Notion Incident DB ????](docs/images/02_pipeline.png)
+_??? ???? Notion ????? ?? ??? ??? ??????._
+
 
 운영 환경에서 불필요한 업데이트를 최소화하기 위해, 기존 페이지를 매번 수정하지 않도록 옵션을 분리해두었습니다.  
 기본 동작은 중복 생성 방지 중심이며, 이미 존재하는 페이지는 업데이트하지 않습니다.
@@ -98,12 +106,20 @@ DEBUG_DUMP=0
 ```bash
 python ingest_news_to_notion.py
 ```
+
+![Notion Incident DB ????](docs/images/03_local_run.png)
+_?? ?? ? ?? ? ?? ??? ???? ?? ?????._
+
 ---
 
 ## GitHub Actions 자동 실행(30분 주기)
 
 수동 실행이 정상 동작한다면, 동일한 설정으로 자동 실행을 운영할 수 있습니다.
 자동 실행은 워크플로우의 schedule 트리거와 GitHub Secrets 설정이 필수 조건입니다.
+
+
+![Notion Incident DB ????](docs/images/04_actions_runs.png)
+_GitHub Actions?? ??? ?? ??? ???? ?? ?????._
 
 ### 1) 워크플로우 스케줄 설정 확인
 
@@ -112,7 +128,7 @@ python ingest_news_to_notion.py
 ```yaml
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "7,37 * * * *"
   workflow_dispatch:
 ```
 cron은 UTC 기준으로 동작합니다.
@@ -130,6 +146,10 @@ Settings → Secrets and variables → Actions → New repository secret
 - ARTICLES_DB_ID
 - NAVER_CLIENT_ID
 - NAVER_CLIENT_SECRET
+
+![Notion Incident DB ????](docs/images/05_github_secrets.png)
+_GitHub Repository Secrets ?? ??? ???? ?????._
+
 
 ---
 
@@ -164,6 +184,10 @@ Notion DB는 운영 효율을 위해 표준 속성 구조를 권장합니다.
 - Tags (Multi-select)
 - Timeline (Rich text)
 
+![Notion Incident DB ????](docs/images/06_notion_properties.png)
+_Notion ?????? ?? ?? ?? ?????._
+
+
 중복 판별은 Link 값을 기준으로 처리하는 방식이 가장 안정적입니다.
 
 ---
@@ -179,6 +203,10 @@ Notion에서는 운영 목적에 맞는 뷰를 구성하면 활용도가 높아�
 - Impact가 High 이상인 항목만 필터링한 뷰
 - 피해기업 기준 필터링 뷰
 - 사고 유형(AttackType) 기준 그룹핑 뷰
+
+![Notion Incident DB ????](docs/images/07_notion_views.png)
+_?? ? ?? ??? ?? ?? ?????._
+
 
 UPDATE_EXISTING을 기본값(0)으로 유지하는 이유는 명확합니다.
 주기 실행 시 동일 페이지가 반복 수정되면 변경 이력이 불필요하게 쌓이고, 협업 환경에서 노이즈가 발생하기 때문입니다.
