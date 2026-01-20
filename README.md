@@ -1,5 +1,7 @@
 # IncidentDashboard
 
+![Notion Incident DB ????](docs/images/00_project_overview.png)
+
 IncidentDashboard는 국내외 보안 사고(침해사고, 개인정보 유출, 해킹 이슈) 관련 뉴스를 주기적으로 수집하여 Notion 데이터베이스에 적재하는 자동화 프로젝트입니다.  
 보안 담당자가 반복적으로 수행하는 사고 정보 수집 및 정리 업무를 줄이고, 보고서 초안 작성에 필요한 근거 자료를 빠르게 확보하는 것을 목표로 합니다.
 
@@ -17,7 +19,7 @@ IncidentDashboard는 국내외 보안 사고(침해사고, 개인정보 유출, 
 
 
 ![Notion Incident DB ????](docs/images/01_notion_list_view.png)
-_Notion DB에 누적 적재된 사고 목록 예시 화면입니다._
+_Notion DB에 누적 적재된 사고 목록 예시 화면._
 
 ---
 
@@ -44,11 +46,12 @@ IncidentDashboard는 다음 절차로 동작합니다.
 4) GitHub Actions가 위 과정을 일정 주기로 자동 실행합니다.
 
 ![Notion Incident DB ????](docs/images/02_pipeline.png)
-_데이터 수집부터 Notion 적재까지의 처리 흐름을 나타낸 구성도입니다._
+_데이터 수집부터 Notion 적재까지의 처리 흐름을 나타낸 구성도._
 
 
-운영 환경에서 불필요한 업데이트를 최소화하기 위해, 기존 페이지를 매번 수정하지 않도록 옵션을 분리해두었습니다.  
-기본 동작은 중복 생성 방지 중심이며, 이미 존재하는 페이지는 업데이트하지 않습니다.
+운영 환경에서 불필요한 업데이트를 최소화하기 위해, 기존 페이지를 매번 수정하지 않도록 옵션을 분리해두었습니다. 
+
+기본 동작은 중복 생성 방지 중심이며, 이미 존재하는 뉴스 기사는 업데이트하지 않습니다.
 
 ---
 
@@ -106,9 +109,9 @@ DEBUG_DUMP=0
 ```bash
 python ingest_news_to_notion.py
 ```
-
+ㄴ
 ![Notion Incident DB ????](docs/images/03_local_run.png)
-_로컬 실행 시 수집 및 적재 결과가 출력되는 에시 화면입니다._
+_로컬 실행 시 수집 및 적재 결과가 출력되는 예시 화면._
 
 ---
 
@@ -119,7 +122,7 @@ _로컬 실행 시 수집 및 적재 결과가 출력되는 에시 화면입니�
 
 
 ![Notion Incident DB ????](docs/images/04_actions_runs.png)
-_GitHub Actions에서 스케줄 실행 기록이 확인되는 예시 화면입니다._
+_GitHub Actions에서 스케줄 실행 기록이 확인되는 예시 화면._
 
 ### 1) 워크플로우 스케줄 설정 확인
 
@@ -134,6 +137,7 @@ on:
 cron은 UTC 기준으로 동작합니다.
 다만 30분 간격 실행은 지역 시간과 무관하게 동일한 주기로 운영됩니다.
 GitHub Actions 특성상 실제 실행 시각이 몇 분 지연될 수 있으며 이는 정상 동작 범위입니다. 
+
 7, 37의 실행 주기는 주로 정각과 30분 단위로 설정 시 트래픽이 몰려 지연을 피하기 위함이므로 사용자가 원하는 시각에 자유롭게 설정할 수 있습니다.
 
 ### 2) Repository Secrets 등록
@@ -149,7 +153,7 @@ Settings → Secrets and variables → Actions → New repository secret
 - NAVER_CLIENT_SECRET
 
 ![Notion Incident DB ????](docs/images/05_github_secrets.png)
-_GitHub Repository Secrets 등록 위치를 안내하는 화면입니다._
+_GitHub Repository Secrets 등록 위치를 안내하는 화면._
 
 
 ---
@@ -186,7 +190,7 @@ Notion DB는 운영 효율을 위해 표준 속성 구조를 권장합니다.
 - Timeline (Rich text)
 
 ![Notion Incident DB ????](docs/images/06_notion_properties.png)
-_Notion 데이터베이스 속성 구조 예시 화면입니다._
+_Notion 데이터베이스 속성 구조 예시 화면._
 
 
 중복 판별은 Link 값을 기준으로 처리하는 방식이 가장 안정적입니다.
@@ -206,7 +210,7 @@ Notion에서는 운영 목적에 맞는 뷰를 구성하면 활용도가 높아�
 - 사고 유형(AttackType) 기준 그룹핑 뷰
 
 ![Notion Incident DB ????](docs/images/07_notion_views.png)
-_필터 및 뷰를 활용한 운영 예시 화면입니다._
+_필터 및 뷰를 활용한 운영 예시 화면._
 
 
 UPDATE_EXISTING을 기본값(0)으로 유지하는 이유는 명확합니다.
