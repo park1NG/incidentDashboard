@@ -70,7 +70,7 @@ _데이터 수집부터 Notion 적재까지의 처리 흐름을 나타낸 구성
 ### 1) 레포지토리 클론
 
 ```bash
-git clone https://github.com/<YOUR_ID>/incidentdashboard.git
+git clone https://github.com/park1NG/incidentDashboard.git
 cd incidentdashboard
 ```
 
