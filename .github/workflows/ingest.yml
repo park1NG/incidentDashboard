@@ -26,6 +26,7 @@ jobs:
 
       - name: Run ingestion
         env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} 
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           ARTICLES_DB_ID: ${{ secrets.ARTICLES_DB_ID }}
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}

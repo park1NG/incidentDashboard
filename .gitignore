@@ -1,0 +1,17 @@
+.env
+debug_notion_access.py
+articles.db
+state.sqlite
+*.sqlite
+*.db
+ai_cache.json
+__pycache__/
+*.pyc
+venv/
+.venv/
+env/
+*.log
+debug_*.jsonl
+debug_*.json
+.DS_Store
+Thumbs.db
