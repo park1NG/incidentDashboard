@@ -59,7 +59,7 @@ HEADERS = {
 }
 
 # 설정 (수동 복구 모드용 변수)
-UPDATE_EXISTING = True  # <-- 최초 1회만 True (기존 50개 복구용), 이후 False 권장
+UPDATE_EXISTING = False  # <-- 최초 1회만 True (기존 50개 복구용), 이후 False 권장
 DRY_RUN = False
 SQLITE_PATH = "state.sqlite"
 
