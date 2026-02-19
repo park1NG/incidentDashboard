@@ -6,8 +6,7 @@ import datetime as dt
 import re
 import html
 import time
-import traceback
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Optional, Dict, Any, List, Tuple
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
@@ -19,15 +18,15 @@ from dateutil import parser as dateparser
 from dotenv import load_dotenv
 
 # ==========================================
-# 1. 환경 변수 및 설정 (기존 유지)
+# 1. 환경 변수 및 설정
 # ==========================================
 env_path = Path(__file__).resolve().parent / '.env'
 if env_path.exists():
     load_dotenv(dotenv_path=env_path, override=True)
 
-# 디버그 덤프 기능 (사용자 원본 복구)
+# 디버그 덤프 기능
 DEBUG_DUMP = os.getenv("DEBUG_DUMP", "0") == "1"
-DEBUG_PATH = "debug_published_at.jsonl"
+DEBUG_PATH = os.getenv("DEBUG_PATH", "debug_published_at.jsonl")
 
 def dump_debug(obj: dict):
     if not DEBUG_DUMP:
@@ -38,17 +37,34 @@ def dump_debug(obj: dict):
     except:
         pass
 
+# Notion query 디버그(요청 시에만 사용)
+DEBUG_NOTION_QUERY = os.getenv("DEBUG_NOTION_QUERY", "0") == "1"
+DEBUG_NOTION_QUERY_PATH = os.getenv("DEBUG_NOTION_QUERY_PATH", "debug_notion_query.jsonl")
+
+def dump_notion_query_debug(obj: dict):
+    if not DEBUG_NOTION_QUERY:
+        return
+    try:
+        with open(DEBUG_NOTION_QUERY_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    except:
+        pass
+
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 ARTICLES_DB_ID = os.getenv("ARTICLES_DB_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-NOTION_VERSION = "2025-09-03" # 사용자 지정 버전
+NOTION_VERSION = "2025-09-03"  # 사용자 지정 버전
 
 NAVER_CLIENT_ID = os.getenv("NAVER_CLIENT_ID")
 NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET")
 
+# 처리 결과 덤프 (기본 ON)
+EXPORT_AFTER_RUN = os.getenv("EXPORT_AFTER_RUN", "1") == "1"
+EXPORT_PATH = os.getenv("EXPORT_PATH", "processed_pages.jsonl")
+EXPORT_PRINT_LIMIT = int(os.getenv("EXPORT_PRINT_LIMIT", "30"))  # Actions 로그에 과다 출력 방지
+
 # 필수 키 검증
 if not NOTION_TOKEN or not ARTICLES_DB_ID:
-    # GitHub Actions에서는 Secrets가 주입되므로 에러 처리만 함
     print("🚨 Error: NOTION_TOKEN or ARTICLES_DB_ID is missing.")
 
 HEADERS = {
@@ -58,12 +74,12 @@ HEADERS = {
     "User-Agent": "IncidentDashboard/1.0 (+local)",
 }
 
-# 설정 (수동 복구 모드용 변수)
-UPDATE_EXISTING = False  # <-- 최초 1회만 True (기존 50개 복구용), 이후 False 권장
+# 설정
+UPDATE_EXISTING = False
 DRY_RUN = False
 SQLITE_PATH = "state.sqlite"
 
-# 소스 (사용자 지정 2개)
+# 소스
 RSS_FEEDS = [
     ("데일리시큐", "https://www.dailysecu.com/rss/allArticle.xml"),
     ("보안뉴스", "http://www.boannews.com/media/news_rss.xml"),
@@ -75,7 +91,7 @@ NAVER_KEYWORDS = [
 ]
 
 # ==========================================
-# 2. SQLite 로컬 DB (사용자 원본 기능 복구)
+# 2. SQLite 로컬 DB
 # ==========================================
 def init_sqlite():
     try:
@@ -134,25 +150,25 @@ def log_run(status: str, message: str):
 # 3. 유틸리티 함수
 # ==========================================
 TAG_RE = re.compile(r"<[^>]+>")
+
 def clean_text(s: str) -> str:
     s = html.unescape(s or "")
     s = TAG_RE.sub("", s)
     return re.sub(r"\s+", " ", s).strip()
 
 def parse_datetime_any(raw: Optional[str]):
-    if not raw: return None
+    if not raw:
+        return None
     try:
         d = dateparser.parse(raw)
-        # 타임존이 없으면(naive) -> KST로 간주
         if not d.tzinfo:
             d = d.replace(tzinfo=ZoneInfo("Asia/Seoul"))
         return d.astimezone(dt.timezone.utc).isoformat()
     except Exception:
-        # 파싱 실패 시 현재 시간
         return dt.datetime.now(dt.timezone.utc).isoformat()
 
 # ==========================================
-# 4. 데이터 수집 (Collector - 디버그 덤프 복구)
+# 4. 데이터 수집
 # ==========================================
 def fetch_rss(url: str) -> feedparser.FeedParserDict:
     r = requests.get(url, headers={"User-Agent": HEADERS["User-Agent"]}, timeout=30)
@@ -171,28 +187,35 @@ def collect_from_rss():
         for e in (feed.entries[:30] or []):
             url = e.get("link")
             title = clean_text(e.get("title", ""))
-            if not url or not title: continue
+            if not url or not title:
+                continue
 
             pub_date = parse_datetime_any(e.get("published") or e.get("updated"))
-            
-            # [복구] 디버그 덤프
+
             dump_debug({
-                "source": source_name, "title": title, "url": url, "pub_raw": e.get("published")
+                "source": source_name,
+                "title": title,
+                "url": url,
+                "pub_raw": e.get("published")
             })
 
             summary = clean_text(e.get("summary") or e.get("description") or "")
             out.append({
-                "source": source_name, "title": title, "url": url,
-                "published_iso": pub_date, "summary": summary[:500]
+                "source": source_name,
+                "title": title,
+                "url": url,
+                "published_iso": pub_date,
+                "summary": summary[:500]
             })
     return out
 
 def collect_from_naver():
-    if not NAVER_CLIENT_ID: return []
+    if not NAVER_CLIENT_ID:
+        return []
     out = []
     print("📡 네이버 뉴스 수집 중...")
     headers = {"X-Naver-Client-Id": NAVER_CLIENT_ID, "X-Naver-Client-Secret": NAVER_CLIENT_SECRET}
-    
+
     for kw in NAVER_KEYWORDS:
         try:
             url = "https://openapi.naver.com/v1/search/news.json"
@@ -206,72 +229,86 @@ def collect_from_naver():
                     pub_date = parse_datetime_any(it.get("pubDate"))
 
                     dump_debug({
-                        "source": "네이버뉴스", "keyword": kw, "title": title, "url": link
+                        "source": "네이버뉴스",
+                        "keyword": kw,
+                        "title": title,
+                        "url": link
                     })
 
                     out.append({
-                        "source": "네이버뉴스", "title": title, "url": link,
-                        "published_iso": pub_date, "summary": summary[:500]
+                        "source": "네이버뉴스",
+                        "title": title,
+                        "url": link,
+                        "published_iso": pub_date,
+                        "summary": summary[:500]
                     })
             time.sleep(0.1)
-        except Exception: continue
+        except Exception:
+            continue
     return out
 
 # ==========================================
-# 5. AI 분석 (Gemini) - [사용자 검증 프롬프트]
+# 5. AI 분석 (Gemini)
 # ==========================================
 def analyze_articles_batch(items):
     api_key = GEMINI_API_KEY
-    if not api_key: return {}
+    if not api_key:
+        return {}
 
     client = genai.Client(api_key=api_key)
-    results = {} 
+    results = {}
     BATCH_SIZE = 30
-    
+
     print(f"\n🤖 AI 분석 시작 (대상: {len(items)}개)...")
 
     for i in range(0, len(items), BATCH_SIZE):
-        batch = items[i : i + BATCH_SIZE]
-        
+        batch = items[i: i + BATCH_SIZE]
+
         batch_input = []
         for idx, item in enumerate(batch):
             batch_input.append({
-                "custom_id": i + idx, 
-                "title": item['title'], 
+                "custom_id": i + idx,
+                "title": item['title'],
                 "summary": item['summary']
             })
 
         batch_idx = (i // BATCH_SIZE) + 1
         print(f"   ➤ AI Batch {batch_idx} 전송 중...")
 
-        # [절대 수정 금지] 사용자 검증 완료된 프롬프트
         prompt_text = (
             "You are an elite Cyber Security Analyst. Your goal is to identify ACTUAL technical security breaches, hacks, and vulnerabilities.\n"
-            "Analyze the following news articles and classify them strictly.\n"
+            "Analyze the following news articles and classify them strictly based on the provided JSON input.\n"
             "\n"
-            "CRITICAL RULES for 'ai_status':\n"
-            "1. 'Critical': MUST be a concrete, confirmed cyber attack event, data breach incident, zero-day vulnerability, or ransomware infection happening NOW or recently.\n"
-            "   - STRICTLY EXCLUDE: Opinions, Editorials(사설/칼럼), Financial Reports(Earnings, Stock prices, Sales), and General Statistics/Surveys.\n"
-            "   - IF the article is about 'Business Performance' (e.g., Sales, Operating Profit, Stock) even if it mentions security companies -> Set to 'Info'.\n"
-            "   - IF the article is about 'Future Predictions' or 'Market Trends' (e.g., 'Risks will increase...') -> Set to 'Info'.\n"
-            "   - IF the article is a 'Government/Company Statement' regarding an already known incident (e.g., Apology, Fine announcement) -> Set to 'Warning'.\n"
+            "*** EVALUATION HIERARCHY (Follow strictly in order) ***\n"
+            "STEP 1. Check for 'Ignore' categories (Entertainment, Sports, Politics). If match -> Set 'Ignore'.\n"
+            "STEP 2. Check for 'Info' categories (Business results, Earnings, Stock, Marketing, Future predictions, General Tech). If match -> Set 'Info'.\n"
+            "STEP 3. Check for 'Critical' categories (CONFIRMED, TECHNICAL breach/attack happening NOW or VERY RECENTLY). If match -> Set 'Critical'.\n"
+            "STEP 4. If none of the above, but related to Security Warnings/Policy/Past Incidents -> Set 'Warning'.\n"
             "\n"
-            "2. 'Warning': High-risk trends, generic phishing warnings (without specific victims), legal/compliance issues (Fines, Lawsuits), or government countermeasures.\n"
+            "*** CRITICAL RULES for 'ai_status' ***\n"
+            "1. 'Critical': MUST be a concrete, confirmed cyber attack event, data breach incident, zero-day vulnerability, or ransomware infection happening NOW.\n"
+            "   - KEYWORD TRIGGER: 'confirmed', 'leaked', 'breached', 'infected', 'exploited'.\n"
+            "   - EXCLUSION: If the article is about a 'Government/Company Apology' or 'Fine' for a PAST event -> It is 'Warning', NOT 'Critical'.\n"
+            "\n"
+            "2. 'Warning': High-risk trends, generic phishing warnings, legal/compliance issues (Fines, Lawsuits), or government countermeasures/statements.\n"
+            "\n"
             "3. 'Info': General tech news, new product launches, policies, advertisements, promotions, appointments(인사), educational seminars, or business/financial news.\n"
-            "4. 'Ignore': Entertainment news (dramas, movies), celebrity gossip, sports, or political scandals not related to cyber warfare.\n"
+            "   - OVERRIDE RULE: If the article mentions 'Sales', 'Operating Profit', 'Stock Price', or 'MOU' -> ALWAYS 'Info'.\n"
+            "\n"
+            "4. 'Ignore': Entertainment, gossip, sports, political scandals.\n"
             "\n"
             "Specific Logic Override:\n"
-            "- Drama/Movie/Webtoon plot: Set status to 'Info'.\n"
-            "- Celebrity privacy (e.g., tax info): Set status to 'Warning'.\n"
-            "- Marketing/Ad/Event: Set status to 'Info'.\n"
-            "- Financial Results/Stocks: Set status to 'Info'.\n"
+            "- Drama/Movie/Webtoon plot: 'Info'\n"
+            "- Celebrity privacy (tax/gossip): 'Warning'\n"
+            "- Marketing/Ad/Event: 'Info'\n"
+            "- Financial Results/Stocks: 'Info'\n"
             "\n"
             "Return a strictly valid JSON list of objects.\n"
             "Each object MUST contain:\n"
             "- 'custom_id': The exact integer ID provided in the input.\n"
-            "- 'ai_status': 'Critical', 'Warning', or 'Info'.\n"
+            "- 'ai_status': 'Critical', 'Warning', 'Info', or 'Ignore'.\n"
             "- 'ai_risk': 'High', 'Medium', or 'Low'.\n"
-            "- 'ai_reason': A short justification in Korean (Explain WHY).\n\n"
+            "- 'ai_reason': A short justification in Korean (Explain WHY based on the Hierarchy).\n\n"
             "Input Data:\n" + json.dumps(batch_input, ensure_ascii=False)
         )
 
@@ -280,98 +317,175 @@ def analyze_articles_batch(items):
                 model='gemini-2.0-flash',
                 contents=prompt_text,
                 config=types.GenerateContentConfig(
-                    response_mime_type='application/json', 
-                    temperature=0.0
+                    response_mime_type='application/json',
+                    temperature=0.0,
+                    top_p=0.1,
+                    top_k=1
                 )
             )
-            
+
             if resp.text:
-                for res in json.loads(resp.text):
+                parsed = json.loads(resp.text)
+                for res in parsed:
                     c_id = res.get('custom_id')
-                    if c_id is not None and c_id < len(items):
+                    if c_id is not None and 0 <= c_id < len(items):
                         original_url = items[c_id]['url']
                         results[original_url] = res
                 print(f"      ✅ Batch {batch_idx} 성공")
-            time.sleep(2) 
+            time.sleep(2)
 
         except Exception as e:
             print(f"   ❌ Batch Error: {e}")
-            
+
     return results
 
 # ==========================================
 # 6. Notion API 함수
 # ==========================================
-def query_page_id_by_fingerprint(fp):
+def query_page_id_by_fingerprint(fp: str) -> Optional[str]:
     url = f"https://api.notion.com/v1/databases/{ARTICLES_DB_ID}/query"
     payload = {
         "filter": {"property": "Fingerprint", "rich_text": {"equals": fp}},
         "page_size": 1
     }
     try:
-        r = requests.post(url, headers=HEADERS, json=payload)
-        res = r.json().get("results")
+        r = requests.post(url, headers=HEADERS, json=payload, timeout=30)
+
+        # 디버그 로그(필요 시 증거 수집)
+        if DEBUG_NOTION_QUERY:
+            retry_after = r.headers.get("Retry-After")
+            body_preview = (r.text or "")[:200]
+            dump_notion_query_debug({
+                "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "fp": fp,
+                "status_code": r.status_code,
+                "retry_after": retry_after,
+                "body_preview": body_preview
+            })
+
+        data = r.json()
+        res = data.get("results") or []
         return res[0]["id"] if res else None
+    except Exception as e:
+        if DEBUG_NOTION_QUERY:
+            dump_notion_query_debug({
+                "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "fp": fp,
+                "error": str(e)
+            })
+        return None
+
+def create_notion_page(props: dict) -> dict:
+    url = "https://api.notion.com/v1/pages"
+    body = {"parent": {"database_id": ARTICLES_DB_ID}, "properties": props}
+    r = requests.post(url, headers=HEADERS, json=body, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+def update_notion_page(page_id: str, props: dict) -> dict:
+    url = f"https://api.notion.com/v1/pages/{page_id}"
+    body = {"properties": props}
+    r = requests.patch(url, headers=HEADERS, json=body, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+# ==========================================
+# 7. 처리 결과 덤프
+# ==========================================
+def safe_get_select_name(page_props: dict, key: str) -> Optional[str]:
+    try:
+        v = page_props.get(key)
+        if not v:
+            return None
+        if v.get("type") == "select" and v.get("select"):
+            return v["select"].get("name")
+        return None
     except:
         return None
 
-def create_notion_page(props):
-    url = "https://api.notion.com/v1/pages"
-    body = {"parent": {"database_id": ARTICLES_DB_ID}, "properties": props}
-    r = requests.post(url, headers=HEADERS, json=body)
-    r.raise_for_status()
+def safe_get_title(page_props: dict, key: str = "Title") -> Optional[str]:
+    try:
+        v = page_props.get(key)
+        if not v:
+            return None
+        if v.get("type") == "title":
+            parts = v.get("title") or []
+            return "".join([p.get("plain_text", "") for p in parts])[:2000]
+        return None
+    except:
+        return None
 
-def update_notion_page(page_id, props):
-    url = f"https://api.notion.com/v1/pages/{page_id}"
-    body = {"properties": props}
-    r = requests.patch(url, headers=HEADERS, json=body)
-    r.raise_for_status()
+def safe_get_url(page_props: dict, key: str = "URL") -> Optional[str]:
+    try:
+        v = page_props.get(key)
+        if not v:
+            return None
+        if v.get("type") == "url":
+            return v.get("url")
+        return None
+    except:
+        return None
+
+def export_processed_pages(processed: List[dict]):
+    """
+    processed: create/update 응답 기반으로 구성된 dict list
+    -> JSONL 파일로 저장 + 일부는 stdout로 요약 출력
+    """
+    if not EXPORT_AFTER_RUN:
+        return
+
+    try:
+        with open(EXPORT_PATH, "w", encoding="utf-8") as f:
+            for row in processed:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+        print(f"\n📤 Export 완료: {EXPORT_PATH} (rows={len(processed)})")
+
+        # Actions 로그 요약(과다 방지)
+        print(f"📌 Export 샘플(상위 {min(EXPORT_PRINT_LIMIT, len(processed))}개):")
+        for row in processed[:EXPORT_PRINT_LIMIT]:
+            print(f" - {row.get('ai_status')} / {row.get('risk_level')} | {row.get('title')[:60]} | {row.get('page_id')}")
+    except Exception as e:
+        print(f"⚠️ Export 실패: {e}")
 
 # ==========================================
-# 7. 메인 실행 (하이브리드 로직)
+# 8. 메인 실행
 # ==========================================
 def main():
-    init_sqlite() # 로컬 DB 초기화 (Actions에선 무의미하나 로컬 테스트 위해 유지)
-    
+    init_sqlite()
     print(f"🚀 Job Start (Update Mode: {UPDATE_EXISTING})")
-    
-    # 1. 수집
+
+    # 1) 수집
     raw_items = collect_from_rss() + collect_from_naver()
     dedup = {x['url']: x for x in raw_items}
     unique_items = list(dedup.values())
     print(f"📥 수집 완료: {len(unique_items)}개")
 
-    # 2. 분석 및 저장 대상 선별 (로컬 DB + Notion API 하이브리드)
+    # 2) 중복 검사 및 처리 대상 선별
     items_to_process = []
     print("🔍 Notion 중복 검사 중...")
-    
+
     for item in unique_items:
         fp = hashlib.sha256(f"{item['source']}|{item['url']}".encode("utf-8")).hexdigest()
         item['fingerprint'] = fp
-        
-        # 1차: 로컬 DB 확인 (로컬 실행 속도 향상용)
-        # 단, UPDATE_EXISTING=True 일때는 무시하고 다시 체크
+
         if not UPDATE_EXISTING and seen_fingerprint(fp):
             continue
 
-        # 2차: Notion API 확인 (GitHub Actions용 필수)
-        # DRY_RUN일 때는 API 호출 아끼기 위해 스킵 가능하나 여기선 정확성 위해 호출
         page_id = query_page_id_by_fingerprint(fp)
-        
+
         if page_id:
             if UPDATE_EXISTING:
                 item['page_id'] = page_id
                 items_to_process.append(item)
             else:
-                # 이미 있으면 로컬 DB에도 업데이트해주고 스킵
                 mark_seen(fp, item['source'], item['url'], page_id)
                 continue
         else:
-            # 없으면 추가
             item['page_id'] = None
             items_to_process.append(item)
-            
-        time.sleep(0.2) 
+
+        time.sleep(0.2)
 
     print(f"✨ 최종 처리 대상: {len(items_to_process)}개")
 
@@ -379,17 +493,18 @@ def main():
         print("✅ 처리할 기사가 없습니다.")
         return
 
-    # 3. AI 분석
+    # 3) AI 분석
     ai_results = analyze_articles_batch(items_to_process)
 
-    # 4. 저장
+    # 4) Notion 반영 + 처리 결과 수집(덤프용)
     print("💾 Notion 반영 시작...")
     success = 0
     errors = 0
-    
+    processed_dump: List[dict] = []
+
     for item in items_to_process:
         ai = ai_results.get(item['url'], {})
-        
+
         props = {
             "Title": {"title": [{"text": {"content": item['title'][:2000]}}]},
             "Source": {"select": {"name": item['source']}},
@@ -408,18 +523,42 @@ def main():
 
         try:
             if item.get('page_id'):
-                update_notion_page(item['page_id'], props)
+                page_obj = update_notion_page(item['page_id'], props)
                 print(f"   🔄 [Updated] {item['title'][:30]}...")
-                mark_seen(item['fingerprint'], item['source'], item['url'], item['page_id'])
             else:
-                create_notion_page(props)
+                page_obj = create_notion_page(props)
                 status_icon = "🟢" if ai.get("ai_status") == "Critical" else "⚪"
                 print(f"   {status_icon} [Created] {item['title'][:30]}...")
-                # 새 페이지 ID는 여기서 굳이 받아오지 않고 'new'로 로컬 마킹
-                mark_seen(item['fingerprint'], item['source'], item['url'], 'new_page')
-            
+
+            page_id = page_obj.get("id")
+            page_props = page_obj.get("properties") or {}
+
+            # 로컬 마킹
+            if page_id:
+                mark_seen(item['fingerprint'], item['source'], item['url'], page_id)
+            else:
+                mark_seen(item['fingerprint'], item['source'], item['url'], 'unknown_page_id')
+
+            # 덤프용 데이터 구성 (Notion이 실제 저장한 값 기준)
+            processed_dump.append({
+                "page_id": page_id,
+                "title": safe_get_title(page_props, "Title") or item['title'],
+                "url": safe_get_url(page_props, "URL") or item['url'],
+                "fingerprint": item['fingerprint'],
+                "source": item['source'],
+                "ai_status": safe_get_select_name(page_props, "AI_Status") or ai.get("ai_status") or "Info",
+                "risk_level": safe_get_select_name(page_props, "Risk_Level") or ai.get("ai_risk") or "Low",
+                "created_time": page_obj.get("created_time"),
+                "last_edited_time": page_obj.get("last_edited_time"),
+                "created_by": (page_obj.get("created_by") or {}).get("id"),
+                "last_edited_by": (page_obj.get("last_edited_by") or {}).get("id"),
+                "op": "updated" if item.get("page_id") else "created",
+                "run_ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+            })
+
             success += 1
-            time.sleep(0.6) 
+            time.sleep(0.6)
+
         except Exception as e:
             print(f"   ⚠️ [Fail] {e}")
             errors += 1
@@ -427,6 +566,9 @@ def main():
     msg = f"Created/Updated: {success}, Errors: {errors}"
     print(f"🎉 작업 완료! ({msg})")
     log_run("ok" if errors == 0 else "partial", msg)
+
+    # 5) 최종 덤프
+    export_processed_pages(processed_dump)
 
 if __name__ == "__main__":
     main()
