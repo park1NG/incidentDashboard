@@ -39,13 +39,12 @@ def dump_debug(obj: dict):
 
 # Notion query 디버그(요청 시에만 사용)
 DEBUG_NOTION_QUERY = os.getenv("DEBUG_NOTION_QUERY", "0") == "1"
-DEBUG_NOTION_QUERY_PATH = os.getenv("DEBUG_NOTION_QUERY_PATH", "debug_notion_query.jsonl")
 
 def dump_notion_query_debug(obj: dict):
     if not DEBUG_NOTION_QUERY:
         return
     try:
-        with open(DEBUG_NOTION_QUERY_PATH, "a", encoding="utf-8") as f:
+        with open("debug_notion_query.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(obj, ensure_ascii=False) + "\n")
     except:
         pass
@@ -342,37 +341,34 @@ def analyze_articles_batch(items):
 # ==========================================
 # 6. Notion API 함수
 # ==========================================
-def query_page_id_by_fingerprint(fp: str) -> Optional[str]:
+def query_page_id_by_fingerprint(fp):
     url = f"https://api.notion.com/v1/databases/{ARTICLES_DB_ID}/query"
     payload = {
-        "filter": {"property": "Fingerprint", "rich_text": {"equals": fp}},
+        "filter": {
+            "property": "Fingerprint",
+            "rich_text": {"equals": fp}
+        },
         "page_size": 1
     }
+
     try:
-        r = requests.post(url, headers=HEADERS, json=payload, timeout=30)
+        r = requests.post(url, headers=HEADERS, json=payload)
 
-        # 디버그 로그(필요 시 증거 수집)
-        if DEBUG_NOTION_QUERY:
-            retry_after = r.headers.get("Retry-After")
-            body_preview = (r.text or "")[:200]
-            dump_notion_query_debug({
-                "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
-                "fp": fp,
-                "status_code": r.status_code,
-                "retry_after": retry_after,
-                "body_preview": body_preview
-            })
+        dump_notion_query_debug({
+            "fingerprint": fp,
+            "status_code": r.status_code,
+            "retry_after": r.headers.get("Retry-After"),
+            "response_preview": r.text[:200]
+        })
 
-        data = r.json()
-        res = data.get("results") or []
+        res = r.json().get("results")
         return res[0]["id"] if res else None
+
     except Exception as e:
-        if DEBUG_NOTION_QUERY:
-            dump_notion_query_debug({
-                "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
-                "fp": fp,
-                "error": str(e)
-            })
+        dump_notion_query_debug({
+            "fingerprint": fp,
+            "error": str(e)
+        })
         return None
 
 def create_notion_page(props: dict) -> dict:
