@@ -46,15 +46,19 @@ def backoff_sleep(attempt: int) -> None:
 
 
 def query_pending_pages(page_size: int):
-    # 🚨 수정된 부분: 최신 Notion API 버전에 맞춰 data_sources 엔드포인트로 마이그레이션
-    ds_id = core.get_active_data_source_id()
-    url = f"https://api.notion.com/v1/data_sources/{ds_id}/query"
+    # 🚨 수정된 부분: 복잡한 데이터 소스 ID 추출 로직 제거
+    # 대신 이 함수(DB 조회)를 실행할 때만 헤더의 버전을 안정화된 2022-06-28로 오버라이드합니다.
+    query_headers = core.HEADERS.copy()
+    query_headers["Notion-Version"] = "2022-06-28"
     
+    url = f"https://api.notion.com/v1/databases/{core.ARTICLES_DB_ID}/query"
     payload = {
         "filter": {"property": PROP_AI_STATE, "select": {"equals": "Pending"}},
         "page_size": page_size
     }
-    r = requests.post(url, headers=core.HEADERS, json=payload, timeout=30)
+    
+    # 덮어씌운 query_headers를 사용하여 요청
+    r = requests.post(url, headers=query_headers, json=payload, timeout=30)
     r.raise_for_status()
     return (r.json() or {}).get("results", [])
 
