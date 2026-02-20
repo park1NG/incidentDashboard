@@ -1,16 +1,16 @@
-name: Ingest News to Notion
+name: Classify Pending Articles
 
 on:
   schedule:
-    - cron: '7,37 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 concurrency:
-  group: ingest-news-to-notion
+  group: classify-pending
   cancel-in-progress: true
 
 jobs:
-  ingest:
+  classify:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -24,26 +24,23 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run ingestion (no AI)
+      - name: Run classifier
         env:
           DEBUG_NOTION_QUERY: 1
-          ENABLE_AI: 0
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           ARTICLES_DB_ID: ${{ secrets.ARTICLES_DB_ID }}
-          NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
-          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
-        run: python ingest_news_to_notion.py
+          MAX_PENDING: 20
+          BATCH_SIZE: 10
+          SLEEP_BETWEEN_BATCHES: 3
+          MAX_RETRIES: 6
+          BASE_BACKOFF: 2
+          MAX_BACKOFF: 60
+        run: python classify_pending.py
 
       - name: Upload Notion Query Debug Log
         uses: actions/upload-artifact@v4
         with:
           name: notion-query-debug
           path: debug_notion_query.jsonl
-          if-no-files-found: warn
-
-      - name: Upload Processed Pages Dump
-        uses: actions/upload-artifact@v4
-        with:
-          name: processed-pages
-          path: processed_pages.jsonl
           if-no-files-found: warn

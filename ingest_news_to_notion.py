@@ -1,4 +1,4 @@
-import os
+﻿import os
 import json
 import hashlib
 import sqlite3
@@ -21,12 +21,29 @@ from dotenv import load_dotenv
 # 1. 환경 변수 및 설정
 # ==========================================
 env_path = Path(__file__).resolve().parent / '.env'
-if env_path.exists():
-    load_dotenv(dotenv_path=env_path, override=True)
 
+# GitHub Actions 환경에서는 secrets/env를 신뢰하고 .env로 덮어쓰지 않음
+if os.getenv("GITHUB_ACTIONS", "").lower() == "true":
+    pass
+else:
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path, override=True)
+
+def _require_env(name: str):
+    v = (os.getenv(name) or "").strip()
+    if not v:
+        raise RuntimeError(f"Missing required env: {name}")
+    return v
+
+if len(ARTICLES_DB_ID.replace("-", "")) != 32:
+    raise RuntimeError(f"ARTICLES_DB_ID format looks wrong: {ARTICLES_DB_ID}")
+    
+NOTION_TOKEN = _require_env("NOTION_TOKEN")
+ARTICLES_DB_ID = _require_env("ARTICLES_DB_ID")
 # 디버그 덤프 기능
 DEBUG_DUMP = os.getenv("DEBUG_DUMP", "0") == "1"
 DEBUG_PATH = os.getenv("DEBUG_PATH", "debug_published_at.jsonl")
+ENABLE_AI = os.getenv("ENABLE_AI", "0") == "1"  # 기본 OFF (분류는 classify_pending.py에서 수행)
 
 def dump_debug(obj: dict):
     if not DEBUG_DUMP:
@@ -422,6 +439,18 @@ def safe_get_url(page_props: dict, key: str = "URL") -> Optional[str]:
     except:
         return None
 
+def safe_get_rich_text(page_props: dict, key: str) -> Optional[str]:
+    try:
+        v = page_props.get(key)
+        if not v:
+            return None
+        if v.get("type") == "rich_text":
+            parts = v.get("rich_text") or []
+            return "".join([p.get("plain_text", "") for p in parts])[:2000]
+        return None
+    except:
+        return None
+
 def export_processed_pages(processed: List[dict]):
     """
     processed: create/update 응답 기반으로 구성된 dict list
@@ -489,8 +518,10 @@ def main():
         print("✅ 처리할 기사가 없습니다.")
         return
 
-    # 3) AI 분석
-    ai_results = analyze_articles_batch(items_to_process)
+    # 3) AI 분석 (기본 OFF)
+    ai_results = {}
+    if ENABLE_AI:
+        ai_results = analyze_articles_batch(items_to_process)
 
     # 4) Notion 반영 + 처리 결과 수집(덤프용)
     print("💾 Notion 반영 시작...")
@@ -508,10 +539,26 @@ def main():
             "Published At": {"date": {"start": item['published_iso']}} if item['published_iso'] else None,
             "Fingerprint": {"rich_text": [{"text": {"content": item['fingerprint']}}]},
             "Summary": {"rich_text": [{"text": {"content": item['summary'][:2000]}}]},
-            "AI_Status": {"select": {"name": ai.get("ai_status", "Info")}},
-            "Risk_Level": {"select": {"name": ai.get("ai_risk", "Low")}},
-            "AI_Reason": {"rich_text": [{"text": {"content": ai.get("ai_reason", "-")[:2000]}}]},
         }
+
+        # ✅ 새 페이지는 무조건 Pending으로 적재 (분류는 별도 워커가 수행)
+        if not item.get("page_id"):
+            props.update({
+                "AI_State": {"select": {"name": "Pending"}},
+                "AI_Error": {"rich_text": [{"text": {"content": ""}}]},
+            })
+
+        # ✅ ENABLE_AI=1일 때만 이 런에서 분류까지 수행
+        if ENABLE_AI:
+            props.update({
+                "AI_Status": {"select": {"name": ai.get("ai_status", "Info")}},
+                "Risk_Level": {"select": {"name": ai.get("ai_risk", "Low")}},
+                "AI_Reason": {"rich_text": [{"text": {"content": ai.get("ai_reason", "-")[:2000]}}]},
+                "AI_State": {"select": {"name": "Done"}},
+                "AI_Error": {"rich_text": [{"text": {"content": ""}}]},
+            })
+
+        props = {k: v for k, v in props.items() if v is not None}
         props = {k: v for k, v in props.items() if v is not None}
 
         if DRY_RUN:
@@ -523,7 +570,7 @@ def main():
                 print(f"   🔄 [Updated] {item['title'][:30]}...")
             else:
                 page_obj = create_notion_page(props)
-                status_icon = "🟢" if ai.get("ai_status") == "Critical" else "⚪"
+                status_icon = ("🟢" if (ENABLE_AI and ai.get("ai_status") == "Critical") else ("🟡" if not ENABLE_AI else "⚪"))
                 print(f"   {status_icon} [Created] {item['title'][:30]}...")
 
             page_id = page_obj.get("id")
@@ -542,8 +589,11 @@ def main():
                 "url": safe_get_url(page_props, "URL") or item['url'],
                 "fingerprint": item['fingerprint'],
                 "source": item['source'],
-                "ai_status": safe_get_select_name(page_props, "AI_Status") or ai.get("ai_status") or "Info",
-                "risk_level": safe_get_select_name(page_props, "Risk_Level") or ai.get("ai_risk") or "Low",
+                "ai_status": safe_get_select_name(page_props, "AI_Status") or (ai.get("ai_status") if ENABLE_AI else None) or "Unclassified",
+                "risk_level": safe_get_select_name(page_props, "Risk_Level") or (ai.get("ai_risk") if ENABLE_AI else None) or "Unknown",
+                "ai_state": safe_get_select_name(page_props, "AI_State") or ("Done" if ENABLE_AI else "Pending"),
+                "ai_error": safe_get_rich_text(page_props, "AI_Error") or "",
+                "ai_reason": safe_get_rich_text(page_props, "AI_Reason") or ((ai.get("ai_reason") if ENABLE_AI else "") or ""),
                 "created_time": page_obj.get("created_time"),
                 "last_edited_time": page_obj.get("last_edited_time"),
                 "created_by": (page_obj.get("created_by") or {}).get("id"),
