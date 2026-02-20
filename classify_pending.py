@@ -46,7 +46,10 @@ def backoff_sleep(attempt: int) -> None:
 
 
 def query_pending_pages(page_size: int):
-    url = f"https://api.notion.com/v1/databases/{core.ARTICLES_DB_ID}/query"
+    # 🚨 수정된 부분: 최신 Notion API 버전에 맞춰 data_sources 엔드포인트로 마이그레이션
+    ds_id = core.get_active_data_source_id()
+    url = f"https://api.notion.com/v1/data_sources/{ds_id}/query"
+    
     payload = {
         "filter": {"property": PROP_AI_STATE, "select": {"equals": "Pending"}},
         "page_size": page_size
