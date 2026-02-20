@@ -10,7 +10,7 @@ import ingest_news_to_notion as core
 # =============================
 # Runtime knobs (env)
 # =============================
-MAX_PENDING = int(os.getenv("MAX_PENDING", "20"))          # 한 번에 가져올 Pending 수
+# 🚨 MAX_PENDING 변수는 전체 조회를 위해 삭제했습니다.
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))           # Gemini 배치 크기
 SLEEP_BETWEEN_BATCHES = float(os.getenv("SLEEP_BETWEEN_BATCHES", "3"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "6"))          # 429 재시도 횟수
@@ -45,22 +45,48 @@ def backoff_sleep(attempt: int) -> None:
     time.sleep(sleep_s)
 
 
-def query_pending_pages(page_size: int):
-    # 🚨 수정된 부분: 복잡한 데이터 소스 ID 추출 로직 제거
-    # 대신 이 함수(DB 조회)를 실행할 때만 헤더의 버전을 안정화된 2022-06-28로 오버라이드합니다.
+def query_pending_pages():
     query_headers = core.HEADERS.copy()
     query_headers["Notion-Version"] = "2022-06-28"
     
     url = f"https://api.notion.com/v1/databases/{core.ARTICLES_DB_ID}/query"
     payload = {
         "filter": {"property": PROP_AI_STATE, "select": {"equals": "Pending"}},
-        "page_size": page_size
+        "page_size": 100  # 노션 API 최대 허용치인 100개 단위로 요청
     }
     
-    # 덮어씌운 query_headers를 사용하여 요청
-    r = requests.post(url, headers=query_headers, json=payload, timeout=60)
-    r.raise_for_status()
-    return (r.json() or {}).get("results", [])
+    all_results = []
+    has_more = True
+    next_cursor = None
+    
+    # 🚨 수정된 부분: Pending 데이터가 남아있는 한 끝까지 긁어오는 Pagination 루프
+    while has_more:
+        if next_cursor:
+            payload["start_cursor"] = next_cursor
+            
+        for attempt in range(3):
+            try:
+                r = requests.post(url, headers=query_headers, json=payload, timeout=60)
+                r.raise_for_status()
+                data = r.json()
+                
+                all_results.extend(data.get("results", []))
+                has_more = data.get("has_more", False)
+                next_cursor = data.get("next_cursor")
+                break  # 성공 시 재시도 루프 탈출
+                
+            except requests.exceptions.ReadTimeout:
+                print(f"⚠️ Notion API 응답 지연 (ReadTimeout). 5초 후 재시도 중... ({attempt + 1}/3)")
+                time.sleep(5)
+            except Exception as e:
+                print(f"⚠️ Notion API 조회 실패: {e}")
+                has_more = False
+                break
+        else:
+            # 3번 모두 실패하면 전체 루프 중단
+            break
+            
+    return all_results
 
 
 def _plain_text_from_rich(parts):
@@ -121,8 +147,10 @@ def main():
     if not core.GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is missing. (GitHub Secrets/ENV에 설정 필요)")
 
-    pages = query_pending_pages(MAX_PENDING)
-    print(f"🧭 Pending 조회: {len(pages)}개 (max={MAX_PENDING})")
+    print("🔍 노션에서 전체 Pending 기사를 조회합니다. (시간이 소요될 수 있습니다)")
+    pages = query_pending_pages()
+    print(f"🧭 총 Pending 조회 완료: {len(pages)}개")
+    
     if not pages:
         print("✅ Pending 없음")
         return
@@ -155,7 +183,7 @@ def main():
         url_to_page_id[url] = page_id
 
     total = len(items)
-    print(f"🤖 분류 대상: {total}개 (batch={BATCH_SIZE})")
+    print(f"🤖 총 분류 대상: {total}개 (batch={BATCH_SIZE})")
     if total == 0:
         print("✅ 분류 대상 없음")
         return
