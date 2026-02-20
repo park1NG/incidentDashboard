@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # ==========================================
 # 1. 환경 변수 및 설정
 # ==========================================
-env_path = Path(__file__).resolve().parent / '.env'
+env_path = Path(__file__).resolve().parent / ".env"
 
 # GitHub Actions 환경에서는 secrets/env를 신뢰하고 .env로 덮어쓰지 않음
 if os.getenv("GITHUB_ACTIONS", "").lower() == "true":
@@ -29,21 +29,50 @@ else:
     if env_path.exists():
         load_dotenv(dotenv_path=env_path, override=True)
 
-def _require_env(name: str):
+def _require_env(name: str) -> str:
     v = (os.getenv(name) or "").strip()
     if not v:
         raise RuntimeError(f"Missing required env: {name}")
     return v
 
-if len(ARTICLES_DB_ID.replace("-", "")) != 32:
-    raise RuntimeError(f"ARTICLES_DB_ID format looks wrong: {ARTICLES_DB_ID}")
-    
+# -----------------------------
+# REQUIRED ENV (여기서 단일 소스로 확정)
+# -----------------------------
 NOTION_TOKEN = _require_env("NOTION_TOKEN")
 ARTICLES_DB_ID = _require_env("ARTICLES_DB_ID")
+
+# (선택) 분류 워크플로우에서만 쓰더라도, 존재하면 읽어둠
+GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
+
+NAVER_CLIENT_ID = (os.getenv("NAVER_CLIENT_ID") or "").strip()
+NAVER_CLIENT_SECRET = (os.getenv("NAVER_CLIENT_SECRET") or "").strip()
+
+# Notion API 버전(고정)
+NOTION_VERSION = "2025-09-03"  # 사용자 지정 버전
+
+# -----------------------------
+# Sanity check (변수 선언 이후)
+# -----------------------------
+if len(ARTICLES_DB_ID.replace("-", "")) != 32:
+    raise RuntimeError(f"ARTICLES_DB_ID format looks wrong: {ARTICLES_DB_ID}")
+
+# -----------------------------
+# Debug / Export flags
+# -----------------------------
 # 디버그 덤프 기능
 DEBUG_DUMP = os.getenv("DEBUG_DUMP", "0") == "1"
 DEBUG_PATH = os.getenv("DEBUG_PATH", "debug_published_at.jsonl")
-ENABLE_AI = os.getenv("ENABLE_AI", "0") == "1"  # 기본 OFF (분류는 classify_pending.py에서 수행)
+
+# Notion query 디버그(요청 시에만 사용)
+DEBUG_NOTION_QUERY = os.getenv("DEBUG_NOTION_QUERY", "0") == "1"
+
+# 처리 결과 덤프 (기본 ON)
+EXPORT_AFTER_RUN = os.getenv("EXPORT_AFTER_RUN", "1") == "1"
+EXPORT_PATH = os.getenv("EXPORT_PATH", "processed_pages.jsonl")
+EXPORT_PRINT_LIMIT = int(os.getenv("EXPORT_PRINT_LIMIT", "30"))  # Actions 로그 과다 출력 방지
+
+# 분류 스위치 (기본 OFF: classify_pending.py에서 수행)
+ENABLE_AI = os.getenv("ENABLE_AI", "0") == "1"
 
 def dump_debug(obj: dict):
     if not DEBUG_DUMP:
@@ -51,11 +80,8 @@ def dump_debug(obj: dict):
     try:
         with open(DEBUG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-    except:
+    except Exception:
         pass
-
-# Notion query 디버그(요청 시에만 사용)
-DEBUG_NOTION_QUERY = os.getenv("DEBUG_NOTION_QUERY", "0") == "1"
 
 def dump_notion_query_debug(obj: dict):
     if not DEBUG_NOTION_QUERY:
@@ -63,26 +89,12 @@ def dump_notion_query_debug(obj: dict):
     try:
         with open("debug_notion_query.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-    except:
+    except Exception:
         pass
 
-NOTION_TOKEN = os.getenv("NOTION_TOKEN")
-ARTICLES_DB_ID = os.getenv("ARTICLES_DB_ID")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-NOTION_VERSION = "2025-09-03"  # 사용자 지정 버전
-
-NAVER_CLIENT_ID = os.getenv("NAVER_CLIENT_ID")
-NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET")
-
-# 처리 결과 덤프 (기본 ON)
-EXPORT_AFTER_RUN = os.getenv("EXPORT_AFTER_RUN", "1") == "1"
-EXPORT_PATH = os.getenv("EXPORT_PATH", "processed_pages.jsonl")
-EXPORT_PRINT_LIMIT = int(os.getenv("EXPORT_PRINT_LIMIT", "30"))  # Actions 로그에 과다 출력 방지
-
-# 필수 키 검증
-if not NOTION_TOKEN or not ARTICLES_DB_ID:
-    print("🚨 Error: NOTION_TOKEN or ARTICLES_DB_ID is missing.")
-
+# -----------------------------
+# Notion headers
+# -----------------------------
 HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
     "Notion-Version": NOTION_VERSION,
@@ -90,12 +102,16 @@ HEADERS = {
     "User-Agent": "IncidentDashboard/1.0 (+local)",
 }
 
-# 설정
+# -----------------------------
+# Runtime settings
+# -----------------------------
 UPDATE_EXISTING = False
 DRY_RUN = False
 SQLITE_PATH = "state.sqlite"
 
-# 소스
+# -----------------------------
+# Sources
+# -----------------------------
 RSS_FEEDS = [
     ("데일리시큐", "https://www.dailysecu.com/rss/allArticle.xml"),
     ("보안뉴스", "http://www.boannews.com/media/news_rss.xml"),
