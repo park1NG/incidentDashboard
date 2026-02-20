@@ -58,7 +58,7 @@ def query_pending_pages(page_size: int):
     }
     
     # 덮어씌운 query_headers를 사용하여 요청
-    r = requests.post(url, headers=query_headers, json=payload, timeout=30)
+    r = requests.post(url, headers=query_headers, json=payload, timeout=60)
     r.raise_for_status()
     return (r.json() or {}).get("results", [])
 
