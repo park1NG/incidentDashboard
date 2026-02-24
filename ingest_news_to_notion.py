@@ -286,7 +286,7 @@ def collect_from_naver():
 # ==========================================
 # 5. AI 분석 (Gemini)
 # ==========================================
-def analyze_articles_batch(items):
+def analyze_articles_batch(items, timeout: float = 60.0):
     api_key = GEMINI_API_KEY
     if not api_key:
         return {}
@@ -348,17 +348,30 @@ def analyze_articles_batch(items):
             "Input Data:\n" + json.dumps(batch_input, ensure_ascii=False)
         )
 
-        try:
-            resp = client.models.generate_content(
+        # 🚨 1. 내부 호출용 래퍼 함수 (SDK 레벨 타임아웃 주입)
+        def _invoke():
+            return client.models.generate_content(
                 model='gemini-2.0-flash',
                 contents=prompt_text,
                 config=types.GenerateContentConfig(
                     response_mime_type='application/json',
                     temperature=0.0,
                     top_p=0.1,
-                    top_k=1
+                    top_k=1,
+                    # HTTP 어댑터 단에서 예산(timeout)을 지키도록 강제
+                    http_options={'timeout': timeout} 
                 )
             )
+
+        try:
+            # 🚨 2. Wall-Clock Hard Guard (스레드 레벨 타임아웃 강제 절단)
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_invoke)
+                try:
+                    resp = future.result(timeout=timeout)
+                except FutureTimeout:
+                    # 지정된 시간을 초과하면 메인 스레드는 뒤도 안 돌아보고 탈출
+                    raise TimeoutError("TIME BUDGET EXCEEDED: Gemini SDK blocked and was hard-terminated")
 
             if resp.text:
                 parsed = json.loads(resp.text)
@@ -370,11 +383,16 @@ def analyze_articles_batch(items):
                 print(f"      ✅ Batch {batch_idx} 성공")
             time.sleep(2)
 
+        except TimeoutError:
+            # 타임아웃은 classify_pending.py가 캐치하여 예산 종료 처리하도록 던짐
+            raise
         except Exception as e:
             print(f"   ❌ Batch Error: {e}")
+            # 🚨 3. 일반 에러(429 등)도 무조건 위로 던져서 서킷 브레이커가 동작하게 함
+            raise
 
     return results
-
+    
 # ==========================================
 # 6. Notion API 함수
 # ==========================================
@@ -415,10 +433,10 @@ def create_notion_page(props: dict) -> dict:
     r.raise_for_status()
     return r.json()
 
-def update_notion_page(page_id: str, props: dict) -> dict:
+def update_notion_page(page_id: str, props: dict, timeout: float = 10.0):
     url = f"https://api.notion.com/v1/pages/{page_id}"
-    body = {"properties": props}
-    r = requests.patch(url, headers=HEADERS, json=body, timeout=30)
+    payload = {"properties": props}
+    r = requests.patch(url, headers=HEADERS, json=payload, timeout=timeout)
     r.raise_for_status()
     return r.json()
 
