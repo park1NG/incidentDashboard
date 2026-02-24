@@ -51,7 +51,7 @@ def sleep_with_budget(seconds: float) -> bool:
     time.sleep(min(seconds, remain))
     return not is_time_budget_exceeded()
 
-def budgeted_timeout(default: float, min_required: float = 1.0) -> float:
+def budgeted_timeout(default: float, min_required: float = 10.0) -> float:
     remain = remaining_budget_sec()
     if remain < min_required:
         raise TimeoutError("Time Budget Exceeded before executing network I/O")
