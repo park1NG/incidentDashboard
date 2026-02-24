@@ -4,6 +4,7 @@ import time
 import random
 import datetime as dt
 import re
+import json
 import requests
 
 # ✅ ingest 모듈(공통 Notion/Gemini 설정 + 함수 재사용)
@@ -66,11 +67,33 @@ def write_github_summary(msg: str):
             pass
     print(msg)
 
+# 🚨 예외 원인 정밀 분류 로직 (Telemetry 정상화)
 def is_gemini_429(exc: Exception) -> bool:
     if hasattr(exc, 'code') and str(exc.code) == '429': return True
     if hasattr(exc, 'status') and 'RESOURCE_EXHAUSTED' in str(exc.status): return True
     s = str(exc).upper()
     return "429" in s or "RESOURCE_EXHAUSTED" in s or "QUOTA EXCEEDED" in s
+
+def is_timeout_exc(exc: Exception) -> bool:
+    s = str(exc).lower()
+    return (
+        isinstance(exc, requests.exceptions.Timeout) or
+        "timed out" in s or
+        "timeout" in s or
+        "read operation timed out" in s
+    )
+
+def is_dns_exc(exc: Exception) -> bool:
+    s = str(exc).lower()
+    return "name or service not known" in s or "temporary failure in name resolution" in s
+
+def gemini_failure_reason(exc: Exception) -> str:
+    if exc is None: return "Gemini Unknown Error (no exception)"
+    if is_time_budget_exc(exc): return f"Time Budget Exceeded: {exc}"
+    if is_gemini_429(exc): return f"Gemini Quota/429: {exc}"
+    if is_timeout_exc(exc): return f"Gemini Timeout: {exc}"
+    if is_dns_exc(exc): return f"Gemini DNS Failure: {exc}"
+    return f"Gemini Unexpected Error: {exc}"
 
 def is_notion_429(exc: Exception) -> bool:
     if isinstance(exc, requests.exceptions.HTTPError) and exc.response is not None:
@@ -84,8 +107,6 @@ def get_notion_query_url() -> str:
     global _NOTION_QUERY_URL
     if _NOTION_QUERY_URL: return _NOTION_QUERY_URL
     target_id = core.ARTICLES_DB_ID
-    
-    # 🚨 보완 1: Fallback 로직의 텔레메트리 오염 방지를 위한 에러 수집
     eval_errors = []
     
     ds_test_url = f"https://api.notion.com/v1/data_sources/{target_id}"
@@ -114,7 +135,6 @@ def get_notion_query_url() -> str:
     except Exception as e: 
         eval_errors.append(f"Database 확인 실패: {e}")
 
-    # 실제 발생한 모든 원인 트레킹 보존
     raise RuntimeError(f"🚨 유효한 Data Source ID를 찾을 수 없습니다. (입력 ID: {target_id}) | 상세: {' / '.join(eval_errors)}")
 
 def query_pages_by_state(state: str, page_size: int = 100):
@@ -131,7 +151,18 @@ def query_pages_by_state(state: str, page_size: int = 100):
         try:
             r = requests.post(query_url, headers=core.HEADERS, json=payload, timeout=budgeted_timeout(60.0))
             r.raise_for_status()
-            return (r.json() or {}).get("results", [])
+            res_data = (r.json() or {}).get("results", [])
+            
+            # 🚨 디버그용 아티팩트 파일 생성 
+            if os.getenv("DEBUG_NOTION_QUERY") == "1":
+                try:
+                    with open("debug_notion_query.jsonl", "w", encoding="utf-8") as f:
+                        for item in res_data:
+                            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+                except Exception as debug_e:
+                    print(f"⚠️ Debug file write failed: {debug_e}")
+                    
+            return res_data
         except requests.exceptions.ReadTimeout as e:
             last_exc = e
             print(f"⚠️ Notion API 응답 지연. 5초 후 재시도... ({attempt + 1}/3)")
@@ -196,7 +227,6 @@ def main():
     if not core.GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is missing.")
 
-    # 🚨 보완 2: Notion API 상한 제약에 대한 운영자 UX 개선
     safe_pending_limit = min(100, MAX_PENDING)
     if MAX_PENDING > 100:
         print(f"⚠️ 설정된 MAX_PENDING({MAX_PENDING})이 API 한도(100)를 초과하여 100개로 클램핑합니다.")
@@ -330,17 +360,18 @@ def main():
                 last_exc = e
                 if is_time_budget_exc(e): break 
                 
-                if is_gemini_429(e):
-                    if attempt < MAX_RETRIES:
-                        print(f"   ⚠️ Gemini 429 발생. 대기 후 재시도... ({attempt+1}/{MAX_RETRIES})")
-                        sleep_sec = min(MAX_BACKOFF, BASE_BACKOFF * (2 ** attempt)) * (0.7 + random.random() * 0.6)
-                        if not sleep_with_budget(sleep_sec):
-                            stop_all = True
-                            stats["circuit_breaker"] = True
-                            stats["cb_reason"] = "Time Budget Exceeded (Gemini backoff 중)"
-                            break
+                # 🚨 수정: 무조건 재시도하는 것이 아니라, Timeout 등 원인에 맞게 로깅 및 백오프
+                if attempt < MAX_RETRIES:
+                    fail_reason = gemini_failure_reason(e)
+                    print(f"   ⚠️ Gemini 호출 실패: {fail_reason}. 대기 후 재시도... ({attempt+1}/{MAX_RETRIES})")
+                    sleep_sec = min(MAX_BACKOFF, BASE_BACKOFF * (2 ** attempt)) * (0.7 + random.random() * 0.6)
+                    if not sleep_with_budget(sleep_sec):
+                        stop_all = True
+                        stats["circuit_breaker"] = True
+                        stats["cb_reason"] = "Time Budget Exceeded (Gemini backoff 중)"
+                        break
                 else:
-                    print(f"   ⚠️ 예기치 않은 에러 발생: {e}")
+                    print(f"   ❌ 예기치 않은 에러 최종 발생: {e}")
                     break 
 
         if stop_all: break
@@ -348,7 +379,8 @@ def main():
         if not ai_results:
             stop_all = True
             stats["circuit_breaker"] = True
-            stats["cb_reason"] = f"Gemini API Quota Exhausted: {last_exc}"
+            # 🚨 수정: 무조건 Quota로 찍지 않고 정밀 분석된 사유 기록
+            stats["cb_reason"] = gemini_failure_reason(last_exc)
             break
 
         for b in batch:
