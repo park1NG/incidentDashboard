@@ -287,13 +287,19 @@ def collect_from_naver():
 # 5. AI 분석 (Gemini)
 # ==========================================
 def analyze_articles_batch(items, timeout: float = 60.0):
-    api_key = GEMINI_API_KEY
+api_key = GEMINI_API_KEY
     if not api_key:
         return {}
 
-    client = genai.Client(api_key=api_key)
+    # 🚨 핵심 수정: 타임아웃을 Config가 아니라 Client 객체 생성 시점에 명시적으로 주입!
+    # 이렇게 해야 내부 httpx가 5초 디폴트를 버리고 우리가 준 60초를 온전히 사용합니다.
+    client = genai.Client(
+        api_key=api_key,
+        http_options={'timeout': timeout} 
+    )
+    
     results = {}
-    BATCH_SIZE = 30 # classify.yml에서 전달되는 크기대로 쪼개져서 들어옴
+    BATCH_SIZE = 5 # 🚨 워크플로우에 맞춰서 5 (또는 2)로 유지
 
     print(f"\n🤖 AI 분석 시작 (대상: {len(items)}개)...")
 
@@ -312,25 +318,26 @@ def analyze_articles_batch(items, timeout: float = 60.0):
         print(f"   ➤ AI Batch {batch_idx} 전송 중...")
 
         prompt_text = (
-            # ... (기존 프롬프트 생략 - 기존 코드 그대로 유지) ...
+            "You are an elite Cyber Security Analyst. Your goal is to identify ACTUAL technical security breaches, hacks, and vulnerabilities.\n"
+            # ... (프롬프트 내용 중략 - 기존과 동일하게 유지해 주세요) ...
             "Input Data:\n" + json.dumps(batch_input, ensure_ascii=False)
         )
 
         def _invoke():
             return client.models.generate_content(
-                model='gemini-2.0-flash', # 기존 사용하시던 모델명으로 유지
+                model='gemini-2.5-flash',
                 contents=prompt_text,
                 config=types.GenerateContentConfig(
                     response_mime_type='application/json',
                     temperature=0.0,
                     top_p=0.1,
-                    top_k=1,
-                    http_options={'timeout': timeout} # SDK 내부 타임아웃 보장
+                    top_k=1
+                    # 🚨 여기서 http_options 제거됨 (위로 올렸으므로)
                 )
             )
 
         try:
-            # 🚨 Wall-Clock Hard Timeout: SDK가 버텨도 메인 스레드는 지정 시간에 무조건 탈출
+            # Wall-Clock Hard Guard 유지
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(_invoke)
                 try:
@@ -345,16 +352,16 @@ def analyze_articles_batch(items, timeout: float = 60.0):
                     if c_id is not None and 0 <= c_id < len(items):
                         original_url = items[c_id]['url']
                         results[original_url] = res
-            print(f"      ✅ Batch {batch_idx} 성공")
+                print(f"      ✅ Batch {batch_idx} 성공")
             time.sleep(2)
 
         except TimeoutError:
             raise
         except Exception as e:
             print(f"   ❌ Batch Error: {e}")
-            raise # 에러 위로 전파하여 CB 작동 유도
+            raise
 
-    return results 
+    return results
 # ==========================================
 # 6. Notion API 함수
 # ==========================================
