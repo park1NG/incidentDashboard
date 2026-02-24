@@ -1,24 +1,29 @@
 import os
+import sys
 import time
 import random
+import datetime as dt
+import re
 import requests
 
 # ✅ ingest 모듈(공통 Notion/Gemini 설정 + 함수 재사용)
 import ingest_news_to_notion as core
 
+# =============================
+# Runtime & Budget knobs (env)
+# =============================
+MAX_PENDING = int(os.getenv("MAX_PENDING", "50"))         
+MAX_RUNTIME_SEC = int(os.getenv("MAX_RUNTIME_SEC", "600"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5"))            
+SLEEP_BETWEEN_BATCHES = float(os.getenv("SLEEP_BETWEEN_BATCHES", "2.0")) 
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))          
+BASE_BACKOFF = float(os.getenv("BASE_BACKOFF", "2"))      
+MAX_BACKOFF = float(os.getenv("MAX_BACKOFF", "60"))       
+
+SCRIPT_START_TIME = time.time()
 
 # =============================
-# Runtime knobs (env)
-# =============================
-# 🚨 MAX_PENDING 변수는 전체 조회를 위해 삭제했습니다.
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))           # Gemini 배치 크기
-SLEEP_BETWEEN_BATCHES = float(os.getenv("SLEEP_BETWEEN_BATCHES", "3"))
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "6"))          # 429 재시도 횟수
-BASE_BACKOFF = float(os.getenv("BASE_BACKOFF", "2"))      # backoff base seconds
-MAX_BACKOFF = float(os.getenv("MAX_BACKOFF", "60"))       # backoff cap seconds
-
-# =============================
-# Notion property names (고정)
+# Notion property names
 # =============================
 PROP_AI_STATE = "AI_State"
 PROP_AI_ERROR = "AI_Error"
@@ -28,100 +33,146 @@ PROP_AI_REASON = "AI_Reason"
 PROP_URL = "URL"
 PROP_TITLE = "Title"
 PROP_SUMMARY = "Summary"
-PROP_SOURCE = "Source"
-PROP_PUBLISHED = "Published At"
-PROP_FINGERPRINT = "Fingerprint"
 
+def remaining_budget_sec() -> float:
+    return max(0.0, MAX_RUNTIME_SEC - (time.time() - SCRIPT_START_TIME))
 
-def is_429_resource_exhausted(exc: Exception) -> bool:
-    s = str(exc)
-    return ("429" in s) or ("RESOURCE_EXHAUSTED" in s) or ("Too many requests" in s)
+def is_time_budget_exceeded() -> bool:
+    return remaining_budget_sec() <= 0.0
 
+def is_time_budget_exc(exc: Exception) -> bool:
+    return "TIME BUDGET EXCEEDED" in str(exc).upper()
 
-def backoff_sleep(attempt: int) -> None:
-    # 지수 백오프 + 지터
-    sleep_s = min(MAX_BACKOFF, BASE_BACKOFF * (2 ** attempt))
-    sleep_s = sleep_s * (0.7 + random.random() * 0.6)  # 0.7~1.3 jitter
-    time.sleep(sleep_s)
+def sleep_with_budget(seconds: float) -> bool:
+    if seconds <= 0: return True
+    remain = remaining_budget_sec()
+    if remain <= 0: return False
+    time.sleep(min(seconds, remain))
+    return not is_time_budget_exceeded()
 
+def budgeted_timeout(default: float, min_required: float = 1.0) -> float:
+    remain = remaining_budget_sec()
+    if remain < min_required:
+        raise TimeoutError("Time Budget Exceeded before executing network I/O")
+    return min(default, remain)
 
-def query_pending_pages():
-    query_headers = core.HEADERS.copy()
-    query_headers["Notion-Version"] = "2022-06-28"
+def write_github_summary(msg: str):
+    summary_file = os.getenv("GITHUB_STEP_SUMMARY")
+    if summary_file:
+        try:
+            with open(summary_file, "a", encoding="utf-8") as f:
+                f.write(msg + "\n")
+        except Exception:
+            pass
+    print(msg)
+
+def is_gemini_429(exc: Exception) -> bool:
+    if hasattr(exc, 'code') and str(exc.code) == '429': return True
+    if hasattr(exc, 'status') and 'RESOURCE_EXHAUSTED' in str(exc.status): return True
+    s = str(exc).upper()
+    return "429" in s or "RESOURCE_EXHAUSTED" in s or "QUOTA EXCEEDED" in s
+
+def is_notion_429(exc: Exception) -> bool:
+    if isinstance(exc, requests.exceptions.HTTPError) and exc.response is not None:
+        if exc.response.status_code == 429: return True
+    s = str(exc).upper()
+    if re.search(r'\b429\b', s): return True
+    return "RATE LIMITED" in s or "TOO MANY REQUESTS" in s
+
+_NOTION_QUERY_URL = None
+def get_notion_query_url() -> str:
+    global _NOTION_QUERY_URL
+    if _NOTION_QUERY_URL: return _NOTION_QUERY_URL
+    target_id = core.ARTICLES_DB_ID
     
-    url = f"https://api.notion.com/v1/databases/{core.ARTICLES_DB_ID}/query"
-    payload = {
-        "filter": {"property": PROP_AI_STATE, "select": {"equals": "Pending"}},
-        "page_size": 100  # 노션 API 최대 허용치인 100개 단위로 요청
-    }
+    # 🚨 보완 1: Fallback 로직의 텔레메트리 오염 방지를 위한 에러 수집
+    eval_errors = []
     
-    all_results = []
-    has_more = True
-    next_cursor = None
-    
-    # 🚨 수정된 부분: Pending 데이터가 남아있는 한 끝까지 긁어오는 Pagination 루프
-    while has_more:
-        if next_cursor:
-            payload["start_cursor"] = next_cursor
-            
-        for attempt in range(3):
-            try:
-                r = requests.post(url, headers=query_headers, json=payload, timeout=60)
-                r.raise_for_status()
-                data = r.json()
-                
-                all_results.extend(data.get("results", []))
-                has_more = data.get("has_more", False)
-                next_cursor = data.get("next_cursor")
-                break  # 성공 시 재시도 루프 탈출
-                
-            except requests.exceptions.ReadTimeout:
-                print(f"⚠️ Notion API 응답 지연 (ReadTimeout). 5초 후 재시도 중... ({attempt + 1}/3)")
-                time.sleep(5)
-            except Exception as e:
-                print(f"⚠️ Notion API 조회 실패: {e}")
-                has_more = False
-                break
+    ds_test_url = f"https://api.notion.com/v1/data_sources/{target_id}"
+    try:
+        r = requests.get(ds_test_url, headers=core.HEADERS, timeout=budgeted_timeout(10.0))
+        r.raise_for_status() 
+        _NOTION_QUERY_URL = f"https://api.notion.com/v1/data_sources/{target_id}/query"
+        return _NOTION_QUERY_URL
+    except TimeoutError:
+        raise
+    except Exception as e: 
+        eval_errors.append(f"DataSource 확인 실패: {e}")
+
+    db_url = f"https://api.notion.com/v1/databases/{target_id}"
+    try:
+        r = requests.get(db_url, headers=core.HEADERS, timeout=budgeted_timeout(15.0))
+        r.raise_for_status() 
+        data_sources = r.json().get("data_sources", [])
+        if data_sources:
+            _NOTION_QUERY_URL = f"https://api.notion.com/v1/data_sources/{data_sources[0].get('id')}/query"
+            return _NOTION_QUERY_URL
         else:
-            # 3번 모두 실패하면 전체 루프 중단
-            break
-            
-    return all_results
+            eval_errors.append("Database에 연결된 Data Source가 없음")
+    except TimeoutError:
+        raise
+    except Exception as e: 
+        eval_errors.append(f"Database 확인 실패: {e}")
 
+    # 실제 발생한 모든 원인 트레킹 보존
+    raise RuntimeError(f"🚨 유효한 Data Source ID를 찾을 수 없습니다. (입력 ID: {target_id}) | 상세: {' / '.join(eval_errors)}")
+
+def query_pages_by_state(state: str, page_size: int = 100):
+    query_url = get_notion_query_url()
+    safe_page_size = min(100, max(1, page_size))
+    
+    payload = {
+        "filter": {"property": PROP_AI_STATE, "select": {"equals": state}},
+        "sorts": [{"timestamp": "created_time", "direction": "ascending"}],
+        "page_size": safe_page_size
+    }
+    last_exc = None
+    for attempt in range(3):
+        try:
+            r = requests.post(query_url, headers=core.HEADERS, json=payload, timeout=budgeted_timeout(60.0))
+            r.raise_for_status()
+            return (r.json() or {}).get("results", [])
+        except requests.exceptions.ReadTimeout as e:
+            last_exc = e
+            print(f"⚠️ Notion API 응답 지연. 5초 후 재시도... ({attempt + 1}/3)")
+            if not sleep_with_budget(5.0):
+                raise TimeoutError("Time Budget Exceeded during query backoff")
+        except Exception as e:
+            last_exc = e
+            if is_time_budget_exc(e): raise  
+            print(f"⚠️ Notion API 조회 실패: {e}")
+            if not sleep_with_budget(2.0):
+                raise TimeoutError("Time Budget Exceeded during query backoff")
+                
+    raise RuntimeError(f"Notion API 조회 최종 실패 (3회 시도): {last_exc}")
 
 def _plain_text_from_rich(parts):
     return "".join([p.get("plain_text", "") for p in (parts or [])])
 
-
-def get_prop_url(props: dict, key: str) -> str:
-    v = props.get(key) or {}
-    if v.get("type") == "url":
-        return v.get("url") or ""
-    return ""
-
-
-def get_prop_title(props: dict, key: str) -> str:
-    v = props.get(key) or {}
-    if v.get("type") == "title":
-        return _plain_text_from_rich(v.get("title"))[:2000]
-    return ""
-
-
-def get_prop_rich_text(props: dict, key: str) -> str:
-    v = props.get(key) or {}
-    if v.get("type") == "rich_text":
-        return _plain_text_from_rich(v.get("rich_text"))[:2000]
-    return ""
-
-
-def mark_pending_with_error(page_id: str, err_code: str, reason: str):
-    props = {
-        PROP_AI_STATE: {"select": {"name": "Pending"}},
-        PROP_AI_ERROR: {"rich_text": [{"text": {"content": err_code[:2000]}}]},
-        PROP_AI_REASON: {"rich_text": [{"text": {"content": reason[:2000]}}]},
-    }
-    core.update_notion_page(page_id, props)
-
+def safe_update_notion(page_id: str, props: dict, max_retries: int = 2):
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            timeout_s = budgeted_timeout(10.0)
+            core.update_notion_page(page_id, props, timeout=timeout_s)
+            
+            if not sleep_with_budget(0.3): 
+                return False, Exception("Time Budget Exceeded after update success")
+            return True, None
+        except Exception as e:
+            last_exc = e
+            if is_time_budget_exc(e): 
+                return False, e
+                
+            if is_notion_429(e):
+                sleep_s = (1.5 ** attempt) * (0.8 + random.random() * 0.4)
+            else:
+                sleep_s = 0.5 
+            
+            if not sleep_with_budget(sleep_s):
+                return False, Exception("Time Budget Exceeded during backoff sleep")
+                
+    return False, last_exc
 
 def mark_failed(page_id: str, err_code: str, reason: str):
     props = {
@@ -129,8 +180,7 @@ def mark_failed(page_id: str, err_code: str, reason: str):
         PROP_AI_ERROR: {"rich_text": [{"text": {"content": err_code[:2000]}}]},
         PROP_AI_REASON: {"rich_text": [{"text": {"content": reason[:2000]}}]},
     }
-    core.update_notion_page(page_id, props)
-
+    return safe_update_notion(page_id, props)
 
 def apply_classification(page_id: str, ai: dict):
     props = {
@@ -140,100 +190,266 @@ def apply_classification(page_id: str, ai: dict):
         PROP_AI_ERROR: {"rich_text": [{"text": {"content": ""}}]},
         PROP_AI_STATE: {"select": {"name": "Done"}},
     }
-    core.update_notion_page(page_id, props)
-
+    return safe_update_notion(page_id, props)
 
 def main():
     if not core.GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY is missing. (GitHub Secrets/ENV에 설정 필요)")
+        raise RuntimeError("GEMINI_API_KEY is missing.")
 
-    print("🔍 노션에서 전체 Pending 기사를 조회합니다. (시간이 소요될 수 있습니다)")
-    pages = query_pending_pages()
-    print(f"🧭 총 Pending 조회 완료: {len(pages)}개")
+    # 🚨 보완 2: Notion API 상한 제약에 대한 운영자 UX 개선
+    safe_pending_limit = min(100, MAX_PENDING)
+    if MAX_PENDING > 100:
+        print(f"⚠️ 설정된 MAX_PENDING({MAX_PENDING})이 API 한도(100)를 초과하여 100개로 클램핑합니다.")
+    print(f"🔍 최대 {safe_pending_limit}개의 Pending 기사를 가져옵니다. (시간 제한: {MAX_RUNTIME_SEC}초)")
+    
+    try:
+        pages = query_pages_by_state("Pending", safe_pending_limit)
+    except Exception as e:
+        msg = f"🛑 **[초기 조회 실패]** 데이터를 가져오지 못했습니다: {e}"
+        write_github_summary(f"### 🔴 Circuit Breaker Tripped (Initialization)\n{msg}")
+        sys.exit(1)
     
     if not pages:
-        print("✅ Pending 없음")
-        return
+        write_github_summary("### 🟢 Incident Dashboard\n✅ 처리할 Pending 항목이 없습니다. (수렴 완료)")
+        sys.exit(0)
 
-    # core.analyze_articles_batch 입력 형태로 구성
+    stats = {
+        "target_urls": 0,
+        "target_pages": len(pages),
+        "attempted_urls": 0,
+        "success_pages": 0,
+        "ai_missing_pages": 0,
+        "missing_url_pages": 0,
+        "update_error_pages": 0,
+        "circuit_breaker": False,
+        "cb_reason": ""
+    }
+
+    counted_error_pages = set()
+    def bump_update_error(pid: str):
+        if pid not in counted_error_pages:
+            counted_error_pages.add(pid)
+            stats["update_error_pages"] += 1
+
+    notion_unhealthy_streak = 0
+    
+    def mark_notion_failure(is_429: bool) -> int:
+        nonlocal notion_unhealthy_streak
+        delta = 3 if is_429 else 1
+        notion_unhealthy_streak += delta
+        return delta
+
+    def mark_notion_success(delta: int = 1):
+        nonlocal notion_unhealthy_streak
+        notion_unhealthy_streak = max(0, notion_unhealthy_streak - delta)
+
+    stop_all = False 
     items = []
-    url_to_page_id = {}
+    url_to_page_ids = {}
 
     for p in pages:
+        if stop_all: break
+        if is_time_budget_exceeded():
+            stop_all = True
+            stats["circuit_breaker"] = True
+            stats["cb_reason"] = "Time Budget Exceeded (Parsing)"
+            break
+
         page_id = p.get("id")
         props = p.get("properties") or {}
 
-        url = get_prop_url(props, PROP_URL)
-        title = get_prop_title(props, PROP_TITLE)
-        summary = get_prop_rich_text(props, PROP_SUMMARY)
+        url = (props.get(PROP_URL) or {}).get("url") or ""
+        title = _plain_text_from_rich((props.get(PROP_TITLE) or {}).get("title"))[:2000]
+        summary_prop = props.get(PROP_SUMMARY) or {}
+        summary = _plain_text_from_rich(summary_prop.get("rich_text") or [])[:2000]
 
         if not page_id or not url:
-            if page_id:
-                mark_failed(page_id, "MISSING_URL", "URL property missing; cannot classify.")
+            if page_id: 
+                fb_success, fb_err = mark_failed(page_id, "MISSING_URL", "URL missing")
+                if fb_success:
+                    stats["missing_url_pages"] += 1
+                    mark_notion_success(1) 
+                else:
+                    if fb_err and is_time_budget_exc(fb_err):
+                        stop_all = True
+                        stats["circuit_breaker"] = True
+                        stats["cb_reason"] = "Time Budget Exceeded (MISSING_URL 처리 중)"
+                        break
+
+                    bump_update_error(page_id)
+                    mark_notion_failure(is_notion_429(fb_err))
+                    
+                    if notion_unhealthy_streak >= 5:
+                        stop_all = True
+                        stats["circuit_breaker"] = True
+                        stats["cb_reason"] = "Notion API 연속 에러 (Parsing 중)"
+                        break 
             continue
 
-        items.append({
-            "url": url,
-            "title": title or "(no title)",
-            "summary": summary or "",
-            "source": "Notion",
-            "published_iso": None,
-            "fingerprint": "pending",
-        })
-        url_to_page_id[url] = page_id
+        if url not in url_to_page_ids:
+            items.append({
+                "url": url,
+                "title": title or "(no title)",
+                "summary": summary or "",
+                "source": "Notion",
+                "published_iso": None,
+                "fingerprint": "pending",
+            })
+            url_to_page_ids[url] = []
+        
+        url_to_page_ids[url].append(page_id)
 
-    total = len(items)
-    print(f"🤖 총 분류 대상: {total}개 (batch={BATCH_SIZE})")
-    if total == 0:
-        print("✅ 분류 대상 없음")
-        return
+    stats["target_urls"] = len(items)
 
-    for i in range(0, total, BATCH_SIZE):
+    print(f"🤖 분류 시작 (URL 대상: {stats['target_urls']}개, Page 대상: {stats['target_pages']}개)")
+
+    for i in range(0, stats["target_urls"], BATCH_SIZE):
+        if stop_all: break
+
+        if is_time_budget_exceeded():
+            stop_all = True
+            stats["circuit_breaker"] = True
+            stats["cb_reason"] = "Time Budget Exceeded (배치 진입 전)"
+            break
+
         batch = items[i:i + BATCH_SIZE]
-        print(f"➤ Batch {i // BATCH_SIZE + 1} ({len(batch)} items)")
+        stats["attempted_urls"] += len(batch)
+        print(f"\n➤ Batch {i // BATCH_SIZE + 1} ({len(batch)} URLs) 처리 중...")
 
         last_exc = None
+        ai_results = {}
+        
         for attempt in range(MAX_RETRIES + 1):
             try:
-                ai_results = core.analyze_articles_batch(batch)  # url -> {ai_status, ai_risk, ai_reason}
-
-                # 결과 반영
-                for url, ai in (ai_results or {}).items():
-                    page_id = url_to_page_id.get(url)
-                    if page_id:
-                        apply_classification(page_id, ai)
-
-                # 누락 결과는 Pending 유지 + 표시
-                missing = [b["url"] for b in batch if b["url"] not in (ai_results or {})]
-                for url in missing:
-                    page_id = url_to_page_id.get(url)
-                    if page_id:
-                        mark_pending_with_error(page_id, "AI_NO_RESULT", "AI returned no result; queued for retry.")
-
-                last_exc = None
-                break
-
+                timeout_s = budgeted_timeout(60.0)
+                ai_results = core.analyze_articles_batch(batch, timeout=timeout_s)
+                
+                if not ai_results: raise Exception("AI 반환 결과가 비어있습니다.")
+                break 
             except Exception as e:
                 last_exc = e
-                if is_429_resource_exhausted(e):
-                    if attempt == MAX_RETRIES:
-                        for b in batch:
-                            page_id = url_to_page_id.get(b["url"])
-                            if page_id:
-                                mark_pending_with_error(page_id, "429_RESOURCE_EXHAUSTED", "AI quota exhausted; queued for retry.")
-                        break
-                    backoff_sleep(attempt)
+                if is_time_budget_exc(e): break 
+                
+                if is_gemini_429(e):
+                    if attempt < MAX_RETRIES:
+                        print(f"   ⚠️ Gemini 429 발생. 대기 후 재시도... ({attempt+1}/{MAX_RETRIES})")
+                        sleep_sec = min(MAX_BACKOFF, BASE_BACKOFF * (2 ** attempt)) * (0.7 + random.random() * 0.6)
+                        if not sleep_with_budget(sleep_sec):
+                            stop_all = True
+                            stats["circuit_breaker"] = True
+                            stats["cb_reason"] = "Time Budget Exceeded (Gemini backoff 중)"
+                            break
                 else:
-                    for b in batch:
-                        page_id = url_to_page_id.get(b["url"])
-                        if page_id:
-                            mark_failed(page_id, "AI_ERROR", str(e))
+                    print(f"   ⚠️ 예기치 않은 에러 발생: {e}")
+                    break 
+
+        if stop_all: break
+
+        if not ai_results:
+            stop_all = True
+            stats["circuit_breaker"] = True
+            stats["cb_reason"] = f"Gemini API Quota Exhausted: {last_exc}"
+            break
+
+        for b in batch:
+            url = b["url"]
+            if url not in ai_results:
+                for page_id in url_to_page_ids.get(url, []):
+                    if is_time_budget_exceeded():
+                        stop_all = True; stats["circuit_breaker"] = True; stats["cb_reason"] = "Time Budget Exceeded (Failed 기록 중)"
+                        break
+
+                    print(f"   ⚠️ AI 응답 누락 격리: {url[:30]}...")
+                    success, err = mark_failed(page_id, "AI_MISSING", "Gemini partial response missing (1st time). Isolated.")
+                    
+                    if success:
+                        stats["ai_missing_pages"] += 1
+                        mark_notion_success(1)
+                    else:
+                        if err and is_time_budget_exc(err):
+                            stop_all = True; stats["circuit_breaker"] = True; stats["cb_reason"] = "Time Budget Exceeded (AI_MISSING 격리 중)"
+                            break
+
+                        bump_update_error(page_id) 
+                        mark_notion_failure(is_notion_429(err))
+                        
+                        if notion_unhealthy_streak >= 5:
+                            stop_all = True; stats["circuit_breaker"] = True; stats["cb_reason"] = "Notion API 연속 에러"
+                            break
+                if stop_all: break
+        if stop_all: break
+
+        for url, ai in ai_results.items():
+            for page_id in url_to_page_ids.get(url, []):
+                if is_time_budget_exceeded():
+                    stop_all = True; stats["circuit_breaker"] = True; stats["cb_reason"] = "Time Budget Exceeded (Done 기록 진입 전)"
                     break
+                
+                success, err = apply_classification(page_id, ai)
+                
+                if success:
+                    stats["success_pages"] += 1
+                    mark_notion_success(1)
+                    print(f"   ✅ 반영 완료: {ai.get('ai_status')} / {ai.get('ai_risk')}")
+                else:
+                    if err and is_time_budget_exc(err):
+                        stop_all = True; stats["circuit_breaker"] = True; stats["cb_reason"] = "Time Budget Exceeded (Done 기록 중)"
+                        break
 
-        time.sleep(SLEEP_BETWEEN_BATCHES)
+                    bump_update_error(page_id) 
+                    print(f"   ⚠️ Notion 업데이트 실패. Failed 격리 시도: {url[:30]}...")
 
-    print("🎉 classify_pending 완료")
+                    applied_penalty = mark_notion_failure(is_notion_429(err))
+                    
+                    fb_success, fb_err = mark_failed(page_id, "NOTION_UPDATE_FAILED", f"Gemini success, but Notion update failed: {err}")
+                    
+                    if fb_success:
+                        mark_notion_success(applied_penalty)
+                    else:
+                        if fb_err and is_time_budget_exc(fb_err):
+                            stop_all = True; stats["circuit_breaker"] = True; stats["cb_reason"] = "Time Budget Exceeded (NOTION_UPDATE_FAILED 롤백 중)"
+                            break
 
+                        print(f"   ❌ Failed 격리조차 실패 (Notion 다운 의심): {fb_err}")
+                        bump_update_error(page_id) 
+                        mark_notion_failure(is_notion_429(fb_err))
+
+                    if notion_unhealthy_streak >= 5:
+                        stop_all = True
+                        stats["circuit_breaker"] = True
+                        stats["cb_reason"] = "Notion API 연속 업데이트 실패 (Rate Limit 등)"
+                        break
+            if stop_all: break
+
+        if stop_all: break
+
+        if not sleep_with_budget(SLEEP_BETWEEN_BATCHES):
+            stop_all = True
+            stats["circuit_breaker"] = True
+            stats["cb_reason"] = "Time Budget Exceeded (배치 간격 대기 중)"
+            break
+
+    skipped_pages = max(0, stats["target_pages"] - (stats["success_pages"] + stats["ai_missing_pages"] + stats["missing_url_pages"] + stats["update_error_pages"]))
+
+    summary_msg = (
+        f"### 📊 Incident Dashboard: Classification Report\n"
+        f"- **실행 시간**: {int(time.time() - SCRIPT_START_TIME)}초\n"
+        f"--- \n"
+        f"- 🎯 **전체 타겟 (Page)**: {stats['target_pages']} 개 (입력 URL: {stats['target_urls']} 개)\n"
+        f"- 🚀 **AI 분석 시도 (URL)**: {stats['attempted_urls']} 개\n"
+        f"- ⏭️ **미시도 보류 (Page)**: {skipped_pages} 개 (다음 런 처리)\n"
+        f"--- \n"
+        f"- ✅ **분류 완료 (Done)**: {stats['success_pages']} 개\n"
+        f"- ❌ **AI 누락 격리 (Failed)**: {stats['ai_missing_pages']} 개\n"
+        f"- 🚫 **URL 누락 격리 (Failed)**: {stats['missing_url_pages']} 개\n"
+        f"- ⚠️ **Notion 통신 에러**: {stats['update_error_pages']} 개\n"
+    )
+
+    if stats["circuit_breaker"]:
+        cb_msg = f"### 🟡 Circuit Breaker Tripped\n- **사유**: {stats['cb_reason']}\n\n"
+        summary_msg = cb_msg + summary_msg
+
+    write_github_summary(summary_msg)
 
 if __name__ == "__main__":
     main()

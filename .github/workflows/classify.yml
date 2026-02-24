@@ -7,7 +7,8 @@ on:
 
 concurrency:
   group: classify-pending
-  cancel-in-progress: true
+  # 🚨 수정 1: Lock 없는 구조에서 데이터 오염을 막기 위해 강제 종료 금지
+  cancel-in-progress: false
 
 jobs:
   classify:
@@ -30,8 +31,10 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           ARTICLES_DB_ID: ${{ secrets.ARTICLES_DB_ID }}
-          MAX_PENDING: 20
-          BATCH_SIZE: 10
+          # 🚨 수정 2: 타임 버짓 및 처리량 튜닝 (15분 크론에 맞춤)
+          MAX_RUNTIME_SEC: 840 # 14분 동안 최대한 처리하고 안전 종료
+          MAX_PENDING: 50      # 백로그 소진을 위해 한 번에 50개씩 당겨옴
+          BATCH_SIZE: 5        # Gemini TPM 한도 초과 방지를 위해 5개씩 묶음
           SLEEP_BETWEEN_BATCHES: 3
           MAX_RETRIES: 6
           BASE_BACKOFF: 2
