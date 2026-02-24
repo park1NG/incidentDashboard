@@ -288,6 +288,80 @@ def collect_from_naver():
 # ==========================================
 def analyze_articles_batch(items, timeout: float = 60.0):
     api_key = GEMINI_API_KEY
+    if not api_key:
+        return {}
+
+    # 🚨 핵심 수정: 타임아웃을 Config가 아니라 Client 객체 생성 시점에 명시적으로 주입!
+    # 이렇게 해야 내부 httpx가 5초 디폴트를 버리고 우리가 준 60초를 온전히 사용합니다.
+    client = genai.Client(
+        api_key=api_key,
+        http_options={'timeout': timeout} 
+    )
+    
+    results = {}
+    BATCH_SIZE = 5 # 🚨 워크플로우에 맞춰서 5 (또는 2)로 유지
+
+    print(f"\n🤖 AI 분석 시작 (대상: {len(items)}개)...")
+
+    for i in range(0, len(items), BATCH_SIZE):
+        batch = items[i: i + BATCH_SIZE]
+
+        batch_input = []
+        for idx, item in enumerate(batch):
+            batch_input.append({
+                "custom_id": i + idx,
+                "title": item['title'],
+                "summary": item['summary']
+            })
+
+        batch_idx = (i // BATCH_SIZE) + 1
+        print(f"   ➤ AI Batch {batch_idx} 전송 중...")
+
+        prompt_text = (
+            "You are an elite Cyber Security Analyst. Your goal is to identify ACTUAL technical security breaches, hacks, and vulnerabilities.\n"
+            # ... (프롬프트 내용 중략 - 기존과 동일하게 유지해 주세요) ...
+            "Input Data:\n" + json.dumps(batch_input, ensure_ascii=False)
+        )
+
+        def _invoke():
+            return client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt_text,
+                config=types.GenerateContentConfig(
+                    response_mime_type='application/json',
+                    temperature=0.0,
+                    top_p=0.1,
+                    top_k=1
+                    # 🚨 여기서 http_options 제거됨 (위로 올렸으므로)
+                )
+            )
+
+        try:
+            # Wall-Clock Hard Guard 유지
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_invoke)
+                try:
+                    resp = future.result(timeout=timeout)
+                except FutureTimeout:
+                    raise TimeoutError("TIME BUDGET EXCEEDED: Gemini SDK blocked and was hard-terminated")
+
+            if resp.text:
+                parsed = json.loads(resp.text)
+                for res in parsed:
+                    c_id = res.get('custom_id')
+                    if c_id is not None and 0 <= c_id < len(items):
+                        original_url = items[c_id]['url']
+                        results[original_url] = res
+                print(f"      ✅ Batch {batch_idx} 성공")
+            time.sleep(2)
+
+        except TimeoutError:
+            raise
+        except Exception as e:
+            print(f"   ❌ Batch Error: {e}")
+            raise
+
+    return results    api_key = GEMINI_API_KEY
         if not api_key:
             return {}
 
